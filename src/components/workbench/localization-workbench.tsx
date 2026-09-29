@@ -4,8 +4,8 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   AlertCircle, ArrowDown, ArrowUp, BookOpen, Check, CheckCheck, ChevronLeft, ChevronRight,
-  CircleAlert, Cloud, CloudOff, Code2, Download, FileText, GitCompare, History, Import,
-  Languages, Link2, Loader2, MessageSquare, RefreshCw, RotateCcw, RotateCw, Save, Search,
+  CircleAlert, Cloud, CloudOff, Code2, Download, Eye, FileText, GitCompare, History, Import,
+  Languages, Link2, Loader2, MessageSquare, PencilLine, RefreshCw, RotateCcw, RotateCw, Save, Search,
   Send, ShieldCheck, Sparkles, Undo2, UndoDot, Variable, X,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
@@ -15,12 +15,16 @@ import { Input } from '@/components/ui/input'
 import { Progress } from '@/components/ui/progress'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
+import { ReadingPreview } from '@/components/workbench/reading-preview'
 import { analyzeDocument, extractVariables, parseMarkdown, renderTargetMarkdown } from '@/lib/markdown'
 import { seedConflicts, seedDiscussions, seedDocument, seedGlossary, seedHistory, seedSegments } from '@/lib/seed'
 import type { Discussion, GlossaryTerm, HistoryEntry, Segment, SegmentStatus, TranslationConflict, TranslationIssue } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
 const DRAFT_KEY = 'sologsb-1003-localization-draft-v1'
+const UI_KEY = 'sologsb-1003-localization-ui-v1'
+type CenterView = 'edit' | 'preview'
+type PreviewScope = 'all' | 'current' | 'issues'
 const kindIcon = { heading: <FileText className="h-3.5 w-3.5" />, paragraph: <FileText className="h-3.5 w-3.5" />, code: <Code2 className="h-3.5 w-3.5" />, link: <Link2 className="h-3.5 w-3.5" />, variable: <Variable className="h-3.5 w-3.5" /> }
 const kindLabel: Record<Segment['kind'], string> = { heading: '标题', paragraph: '段落', code: '代码块', link: '链接', variable: '占位符' }
 const statusLabel: Record<SegmentStatus, string> = { draft: '草稿', 'needs-work': '待处理', confirmed: '已确认', returned: '已退回' }
@@ -48,6 +52,8 @@ export function LocalizationWorkbench() {
   const [checkedIssues, setCheckedIssues] = useState<TranslationIssue[] | null>(null)
   const [selectedSegmentId, setSelectedSegmentId] = useState('seg-05')
   const [mode, setMode] = useState<'translate' | 'review'>('translate')
+  const [centerView, setCenterView] = useState<CenterView>('edit')
+  const [previewScope, setPreviewScope] = useState<PreviewScope>('all')
   const [filter, setFilter] = useState<'all' | 'issues' | 'untranslated' | 'confirmed'>('all')
   const [glossarySearch, setGlossarySearch] = useState('')
   const [discussionDraft, setDiscussionDraft] = useState('')
@@ -136,6 +142,11 @@ export function LocalizationWorkbench() {
   const filteredGlossary = glossary.filter((term) => `${term.source} ${term.target}`.toLowerCase().includes(glossarySearch.toLowerCase()))
   const selectedDiscussions = discussions.filter((discussion) => discussion.segmentId === selectedSegment?.id)
   const mockConnected = documentQuery.isFetched && historyQuery.isFetched && conflictQuery.isFetched
+  const previewSegments = useMemo(() => {
+    if (previewScope === 'current') return selectedSegment ? [selectedSegment] : []
+    if (previewScope === 'issues') return segments.filter((segment) => issueSegmentIds.has(segment.id))
+    return segments
+  }, [issueSegmentIds, previewScope, segments, selectedSegment])
 
   useEffect(() => {
     if (hydrated) return
@@ -151,6 +162,16 @@ export function LocalizationWorkbench() {
         }
       }
     } catch { /* start from seed */ }
+    try {
+      const rawUi = localStorage.getItem(UI_KEY)
+      if (rawUi) {
+        const ui = JSON.parse(rawUi) as Partial<{ selectedSegmentId: string; centerView: CenterView; previewScope: PreviewScope; mode: 'translate' | 'review' }>
+        if (ui.selectedSegmentId) setSelectedSegmentId(ui.selectedSegmentId)
+        if (ui.centerView === 'edit' || ui.centerView === 'preview') setCenterView(ui.centerView)
+        if (ui.previewScope === 'all' || ui.previewScope === 'current' || ui.previewScope === 'issues') setPreviewScope(ui.previewScope)
+        if (ui.mode === 'translate' || ui.mode === 'review') setMode(ui.mode)
+      }
+    } catch { /* keep default ui state */ }
     setHydrated(true)
   }, [hydrated])
 
@@ -158,6 +179,11 @@ export function LocalizationWorkbench() {
     if (!hydrated) return
     try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ segments, discussions, glossary, history })) } catch { /* storage may be unavailable */ }
   }, [discussions, glossary, history, hydrated, segments])
+
+  useEffect(() => {
+    if (!hydrated) return
+    try { localStorage.setItem(UI_KEY, JSON.stringify({ selectedSegmentId, centerView, previewScope, mode })) } catch { /* storage may be unavailable */ }
+  }, [centerView, hydrated, mode, previewScope, selectedSegmentId])
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -215,7 +241,21 @@ export function LocalizationWorkbench() {
   }
   const selectAndScroll = (segmentId: string) => {
     setSelectedSegmentId(segmentId)
-    requestAnimationFrame(() => document.getElementById(`segment-${segmentId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
+    requestAnimationFrame(() => document.getElementById(centerView === 'preview' ? `preview-${segmentId}` : `segment-${segmentId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
+  }
+  const revealSegment = (segmentId: string) => {
+    setSelectedSegmentId(segmentId)
+    setCenterView('edit')
+    setFilter((current) => {
+      if (current === 'all') return current
+      const segment = segments.find((item) => item.id === segmentId)
+      if (!segment) return 'all'
+      if (current === 'issues') return issueSegmentIds.has(segmentId) ? current : 'all'
+      if (current === 'untranslated') return segment.targetText.trim() ? 'all' : current
+      if (current === 'confirmed') return segment.status === 'confirmed' ? current : 'all'
+      return current
+    })
+    window.setTimeout(() => document.getElementById(`segment-${segmentId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 80)
   }
   const nextIssue = (direction: 1 | -1 = 1) => {
     const ids = Array.from(new Set(issues.map((issue) => issue.segmentId)))
@@ -359,13 +399,33 @@ export function LocalizationWorkbench() {
 
         <section className="workbench-center min-w-0 space-y-3">
           <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-white p-2.5 shadow-sm">
-            <div className="flex items-center rounded-lg bg-slate-100 p-1">
-              {([['all', '全部'], ['issues', '问题'], ['untranslated', '漏译'], ['confirmed', '已确认']] as const).map(([value, label]) => <button key={value} onClick={() => setFilter(value)} className={cn('rounded-md px-3 py-1.5 text-xs font-medium transition', filter === value ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800')}>{label}</button>)}
+            <div className="flex items-center rounded-lg bg-slate-900 p-1">
+              <button onClick={() => setCenterView('edit')} className={cn('flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition', centerView === 'edit' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-400 hover:text-white')}><PencilLine className="h-3.5 w-3.5" />对照编辑</button>
+              <button onClick={() => setCenterView('preview')} className={cn('flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition', centerView === 'preview' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-400 hover:text-white')}><Eye className="h-3.5 w-3.5" />阅读预览</button>
             </div>
-            <div className="ml-auto flex items-center gap-2 text-xs text-slate-500"><span>{filteredSegments.length} / {segments.length}</span><Button variant="outline" size="sm" onClick={() => nextIssue(-1)}><ArrowUp className="h-3.5 w-3.5" />上一问题</Button><Button variant="outline" size="sm" onClick={() => nextIssue(1)}>下一问题<ArrowDown className="h-3.5 w-3.5" /></Button></div>
+            {centerView === 'edit' ? (
+              <div className="flex items-center rounded-lg bg-slate-100 p-1">
+                {([['all', '全部'], ['issues', '问题'], ['untranslated', '漏译'], ['confirmed', '已确认']] as const).map(([value, label]) => <button key={value} onClick={() => setFilter(value)} className={cn('rounded-md px-3 py-1.5 text-xs font-medium transition', filter === value ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800')}>{label}</button>)}
+              </div>
+            ) : (
+              <div className="flex items-center rounded-lg bg-slate-100 p-1">
+                {([['all', '全部'], ['current', '当前片段'], ['issues', '问题片段']] as const).map(([value, label]) => <button key={value} onClick={() => setPreviewScope(value)} className={cn('rounded-md px-3 py-1.5 text-xs font-medium transition', previewScope === value ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800')}>{label}</button>)}
+              </div>
+            )}
+            <div className="ml-auto flex items-center gap-2 text-xs text-slate-500"><span>{centerView === 'edit' ? filteredSegments.length : previewSegments.length} / {segments.length}</span><Button variant="outline" size="sm" onClick={() => nextIssue(-1)}><ArrowUp className="h-3.5 w-3.5" />上一问题</Button><Button variant="outline" size="sm" onClick={() => nextIssue(1)}>下一问题<ArrowDown className="h-3.5 w-3.5" /></Button></div>
           </div>
 
-          {filteredSegments.map((segment) => {
+          {centerView === 'preview' && (
+            <ReadingPreview
+              segments={previewSegments}
+              issueMap={issueMap}
+              selectedSegmentId={selectedSegment?.id}
+              onSelect={setSelectedSegmentId}
+              onRevealIssue={revealSegment}
+            />
+          )}
+
+          {centerView === 'edit' && filteredSegments.map((segment) => {
             const segmentIssues = issueMap[segment.id] ?? []
             const isSelected = selectedSegment?.id === segment.id
             const isReturnSelected = selectedForReturn.has(segment.id)
@@ -399,7 +459,7 @@ export function LocalizationWorkbench() {
               </article>
             )
           })}
-          {!filteredSegments.length && <Card><CardContent className="grid min-h-52 place-items-center text-center"><div><Sparkles className="mx-auto h-7 w-7 text-blue-500" /><p className="mt-3 text-sm font-medium">当前筛选下没有片段</p><p className="mt-1 text-xs text-slate-500">切换筛选条件或运行检查。</p></div></CardContent></Card>}
+          {centerView === 'edit' && !filteredSegments.length && <Card><CardContent className="grid min-h-52 place-items-center text-center"><div><Sparkles className="mx-auto h-7 w-7 text-blue-500" /><p className="mt-3 text-sm font-medium">当前筛选下没有片段</p><p className="mt-1 text-xs text-slate-500">切换筛选条件或运行检查。</p></div></CardContent></Card>}
         </section>
 
         <aside className="workbench-right min-w-0">
