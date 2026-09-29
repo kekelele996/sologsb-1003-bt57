@@ -76,3 +76,57 @@ export const analyzeDocument = (segments: Segment[], glossary: GlossaryTerm[]) =
 
 export const renderTargetMarkdown = (segments: Segment[]) =>
   segments.map((segment) => segment.targetText || segment.sourceText).join('\n\n')
+
+export type InlineTokenType = 'text' | 'code' | 'link' | 'variable'
+
+export interface InlineToken {
+  type: InlineTokenType
+  raw: string
+  index: number
+  label?: string
+  url?: string
+}
+
+export interface InlineOccurrence {
+  type: 'variable' | 'link'
+  value: string
+  label?: string
+}
+
+// 依次匹配行内代码、Markdown 链接、变量占位符；代码 span 内的占位符不参与对齐
+const inlineTokenPattern = /(`+)(?:(?!\1)[^`\n])*?\1|\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|\{\{[^{}]+\}\}|\{[A-Za-z_][\w.-]*\}|%\((?:[^)]+)\)[sd]|%[sd]/g
+
+export const tokenizeInline = (text: string): InlineToken[] => {
+  const tokens: InlineToken[] = []
+  let last = 0
+  const pushText = (raw: string, index: number) => { if (raw) tokens.push({ type: 'text', raw, index }) }
+  for (const match of text.matchAll(inlineTokenPattern)) {
+    const index = match.index ?? 0
+    pushText(text.slice(last, index), last)
+    const raw = match[0]
+    if (raw.startsWith('`')) tokens.push({ type: 'code', raw, index })
+    else if (raw.startsWith('[')) tokens.push({ type: 'link', raw, index, label: match[2], url: match[3] })
+    else tokens.push({ type: 'variable', raw, index })
+    last = index + raw.length
+  }
+  pushText(text.slice(last), last)
+  return tokens
+}
+
+export const extractInlineOccurrences = (text: string): InlineOccurrence[] =>
+  tokenizeInline(text).flatMap<InlineOccurrence>((token) => {
+    if (token.type === 'link') return [{ type: 'link', value: token.url ?? '', label: token.label }]
+    if (token.type === 'variable') return [{ type: 'variable', value: token.raw }]
+    return []
+  })
+
+export const splitFencedCode = (text: string): { language: string; body: string } | null => {
+  const match = text.match(/^```([^\s`]*)[^\n]*\n([\s\S]*?)\n?```$/)
+  if (!match) return null
+  return { language: match[1] || 'text', body: match[2] }
+}
+
+export const headingLevel = (line: string): number => {
+  const match = line.match(/^(#{1,6})(?=\s)/)
+  return match ? match[1].length : 0
+}

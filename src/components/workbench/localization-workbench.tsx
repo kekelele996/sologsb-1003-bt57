@@ -4,9 +4,9 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   AlertCircle, ArrowDown, ArrowUp, BookOpen, Check, CheckCheck, ChevronLeft, ChevronRight,
-  CircleAlert, Cloud, CloudOff, Code2, Download, FileText, GitCompare, History, Import,
-  Languages, Link2, Loader2, MessageSquare, RefreshCw, RotateCcw, RotateCw, Save, Search,
-  Send, ShieldCheck, Sparkles, Undo2, UndoDot, Variable, X,
+  CircleAlert, Cloud, CloudOff, Code2, Download, Eye, FileText, GitCompare, History, Import,
+  Languages, Link2, Loader2, MessageSquare, PencilLine, RefreshCw, RotateCcw, RotateCw, Save,
+  Search, Send, ShieldCheck, Sparkles, Undo2, UndoDot, Variable, X,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -16,6 +16,7 @@ import { Progress } from '@/components/ui/progress'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { analyzeDocument, extractVariables, parseMarkdown, renderTargetMarkdown } from '@/lib/markdown'
+import { MarkdownPreviewSegment } from '@/components/workbench/markdown-preview'
 import { seedConflicts, seedDiscussions, seedDocument, seedGlossary, seedHistory, seedSegments } from '@/lib/seed'
 import type { Discussion, GlossaryTerm, HistoryEntry, Segment, SegmentStatus, TranslationConflict, TranslationIssue } from '@/lib/types'
 import { cn } from '@/lib/utils'
@@ -48,6 +49,7 @@ export function LocalizationWorkbench() {
   const [checkedIssues, setCheckedIssues] = useState<TranslationIssue[] | null>(null)
   const [selectedSegmentId, setSelectedSegmentId] = useState('seg-05')
   const [mode, setMode] = useState<'translate' | 'review'>('translate')
+  const [editorView, setEditorView] = useState<'edit' | 'preview'>('edit')
   const [filter, setFilter] = useState<'all' | 'issues' | 'untranslated' | 'confirmed'>('all')
   const [glossarySearch, setGlossarySearch] = useState('')
   const [discussionDraft, setDiscussionDraft] = useState('')
@@ -105,7 +107,11 @@ export function LocalizationWorkbench() {
     },
     onSuccess: () => {
       setDirty(false)
-      try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ segments, discussions, glossary, history })) } catch { /* storage may be unavailable */ }
+      try {
+        localStorage.setItem(DRAFT_KEY, JSON.stringify({
+          segments, discussions, glossary, history, mode, editorView, filter, selectedSegmentId,
+        }))
+      } catch { /* storage may be unavailable */ }
     },
   })
   const reviewMutation = useMutation({
@@ -142,22 +148,60 @@ export function LocalizationWorkbench() {
     try {
       const raw = localStorage.getItem(DRAFT_KEY)
       if (raw) {
-        const draft = JSON.parse(raw) as { segments: Segment[]; discussions: Discussion[]; glossary: GlossaryTerm[]; history: HistoryEntry[] }
+        const draft = JSON.parse(raw) as {
+          segments: Segment[]
+          discussions: Discussion[]
+          glossary: GlossaryTerm[]
+          history: HistoryEntry[]
+          mode?: 'translate' | 'review'
+          editorView?: 'edit' | 'preview'
+          filter?: 'all' | 'issues' | 'untranslated' | 'confirmed'
+          selectedSegmentId?: string
+        }
         if (draft.segments?.length) {
           setSegments(draft.segments)
           setDiscussions(draft.discussions ?? seedDiscussions)
           setGlossary(draft.glossary ?? seedGlossary)
           setHistory(draft.history ?? seedHistory)
         }
+        if (draft.mode) setMode(draft.mode)
+        if (draft.editorView) setEditorView(draft.editorView)
+        if (draft.filter) setFilter(draft.filter)
+        // 当前片段仅在恢复后的文档中仍存在时才还原
+        if (draft.selectedSegmentId) {
+          const pool = draft.segments?.length ? draft.segments : segments
+          if (pool.some((segment) => segment.id === draft.selectedSegmentId)) {
+            setSelectedSegmentId(draft.selectedSegmentId)
+          }
+        }
       }
     } catch { /* start from seed */ }
     setHydrated(true)
-  }, [hydrated])
+  }, [hydrated, segments])
 
   useEffect(() => {
     if (!hydrated) return
-    try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ segments, discussions, glossary, history })) } catch { /* storage may be unavailable */ }
-  }, [discussions, glossary, history, hydrated, segments])
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({
+        segments, discussions, glossary, history, mode, editorView, filter, selectedSegmentId,
+      }))
+    } catch { /* storage may be unavailable */ }
+  }, [discussions, editorView, filter, glossary, history, hydrated, mode, segments, selectedSegmentId])
+
+  // 重开页面后恢复预览中的滚动位置（当前片段）
+  useEffect(() => {
+    if (!hydrated) return
+    const id = `segment-${selectedSegmentId}`
+    const previewId = `preview-${selectedSegmentId}`
+    requestAnimationFrame(() => {
+      const target = editorView === 'preview'
+        ? document.getElementById(previewId)
+        : document.getElementById(id)
+      target?.scrollIntoView({ block: 'center' })
+    })
+  // 仅在水合完成、以及编辑/预览视图切换时滚动，避免编辑过程中频繁跳动
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, editorView])
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -215,7 +259,29 @@ export function LocalizationWorkbench() {
   }
   const selectAndScroll = (segmentId: string) => {
     setSelectedSegmentId(segmentId)
-    requestAnimationFrame(() => document.getElementById(`segment-${segmentId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
+    // 目标片段被当前筛选范围隐藏时，先放开筛选，等下一帧渲染后再滚动
+    if (!filteredSegments.some((segment) => segment.id === segmentId)) setFilter('all')
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const id = editorView === 'preview' ? `preview-${segmentId}` : `segment-${segmentId}`
+        document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      })
+    })
+  }
+  // 从阅读预览（或内联提示）跳回编辑区对应的原片段
+  const locateInEditor = (segmentId: string) => {
+    const exists = segments.some((segment) => segment.id === segmentId)
+    if (!exists) return
+    // 当前筛选范围不含目标片段时，先放开筛选，保证片段渲染出来
+    if (!filteredSegments.some((segment) => segment.id === segmentId)) setFilter('all')
+    setSelectedSegmentId(segmentId)
+    setEditorView('edit')
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        document.getElementById(`segment-${segmentId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        if (mode === 'translate') document.getElementById(`target-${segmentId}`)?.focus({ preventScroll: true })
+      })
+    })
   }
   const nextIssue = (direction: 1 | -1 = 1) => {
     const ids = Array.from(new Set(issues.map((issue) => issue.segmentId)))
@@ -362,10 +428,14 @@ export function LocalizationWorkbench() {
             <div className="flex items-center rounded-lg bg-slate-100 p-1">
               {([['all', '全部'], ['issues', '问题'], ['untranslated', '漏译'], ['confirmed', '已确认']] as const).map(([value, label]) => <button key={value} onClick={() => setFilter(value)} className={cn('rounded-md px-3 py-1.5 text-xs font-medium transition', filter === value ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800')}>{label}</button>)}
             </div>
+            <div className="flex items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+              <button onClick={() => setEditorView('edit')} className={cn('flex items-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium transition', editorView === 'edit' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800')}><PencilLine className="h-3.5 w-3.5" />对照编辑</button>
+              <button onClick={() => setEditorView('preview')} className={cn('flex items-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium transition', editorView === 'preview' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800')}><Eye className="h-3.5 w-3.5" />阅读预览</button>
+            </div>
             <div className="ml-auto flex items-center gap-2 text-xs text-slate-500"><span>{filteredSegments.length} / {segments.length}</span><Button variant="outline" size="sm" onClick={() => nextIssue(-1)}><ArrowUp className="h-3.5 w-3.5" />上一问题</Button><Button variant="outline" size="sm" onClick={() => nextIssue(1)}>下一问题<ArrowDown className="h-3.5 w-3.5" /></Button></div>
           </div>
 
-          {filteredSegments.map((segment) => {
+          {editorView === 'edit' && filteredSegments.map((segment) => {
             const segmentIssues = issueMap[segment.id] ?? []
             const isSelected = selectedSegment?.id === segment.id
             const isReturnSelected = selectedForReturn.has(segment.id)
@@ -399,6 +469,22 @@ export function LocalizationWorkbench() {
               </article>
             )
           })}
+          {editorView === 'preview' && (
+            <div className="space-y-3">
+              <div className="rounded-xl border border-blue-100 bg-blue-50/60 px-3.5 py-2.5 text-[11px] leading-5 text-blue-800">
+                阅读预览按发布后的排版逐段渲染标题、正文、代码块与链接；译文为空时回退原文并标记“未翻译”，变量缺失或链接不一致会在对应位置用红色虚线标出。点击任意卡片或提示即可回到对应片段继续翻译。
+              </div>
+              {filteredSegments.map((segment) => (
+                <MarkdownPreviewSegment
+                  key={segment.id}
+                  segment={segment}
+                  issues={issueMap[segment.id] ?? []}
+                  selected={selectedSegment?.id === segment.id}
+                  onLocate={() => locateInEditor(segment.id)}
+                />
+              ))}
+            </div>
+          )}
           {!filteredSegments.length && <Card><CardContent className="grid min-h-52 place-items-center text-center"><div><Sparkles className="mx-auto h-7 w-7 text-blue-500" /><p className="mt-3 text-sm font-medium">当前筛选下没有片段</p><p className="mt-1 text-xs text-slate-500">切换筛选条件或运行检查。</p></div></CardContent></Card>}
         </section>
 
